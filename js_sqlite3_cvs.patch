@@ -1,0 +1,579 @@
+Index: GNUmakefile
+===================================================================
+RCS file: /cvsroot/sbbs/src/sbbs3/GNUmakefile,v
+retrieving revision 1.221
+diff -u -r1.221 GNUmakefile
+--- GNUmakefile	1 Jun 2012 06:33:01 -0000	1.221
++++ GNUmakefile	27 Jul 2012 18:35:34 -0000
+@@ -99,6 +99,7 @@
+ vpath %.c ../comio
+ OBJS	+= $(MTOBJODIR)$(DIRSEP)comio_nix$(OFILE)
+ LDFLAGS +=	$(UIFC-MT_LDFLAGS) $(XPDEV-MT_LDFLAGS) $(SMBLIB_LDFLAGS) $(CIOLIB-MT_LDFLAGS) $(JS_LDFLAGS) $(CRYPT_LDFLAGS)
++SBBS_LIBS +=  -lsqlite3
+ 
+ # Monolithic Synchronet executable Build Rule
+ $(SBBSMONO): $(MONO_OBJS) $(OBJS)
+Index: js_global.c
+===================================================================
+RCS file: /cvsroot/sbbs/src/sbbs3/js_global.c,v
+retrieving revision 1.315
+diff -u -r1.315 js_global.c
+--- js_global.c	15 Mar 2012 09:17:49 -0000	1.315
++++ js_global.c	27 Jul 2012 18:35:38 -0000
+@@ -4086,6 +4086,11 @@
+ 		if(js_CreateCOMClass(js_cx, *glob)==NULL)
+ 			break;
+ 
++		/* Sqlite Class */
++		if(js_CreateSqliteClass(js_cx, *glob)==NULL) {
++			break;
++		}
++
+ 		/* Area Objects */
+ 		if(!js_CreateUserObjects(js_cx, *glob, cfg, /* user: */NULL, client, /* html_index_fname: */NULL, /* subscan: */NULL)) 
+ 			break;
+Index: objects.mk
+===================================================================
+RCS file: /cvsroot/sbbs/src/sbbs3/objects.mk,v
+retrieving revision 1.56
+diff -u -r1.56 objects.mk
+--- objects.mk	9 Oct 2011 02:54:35 -0000	1.56
++++ objects.mk	27 Jul 2012 18:35:39 -0000
+@@ -59,6 +59,7 @@
+ 			$(MTOBJODIR)$(DIRSEP)js_sprintf$(OFILE)\
+ 			$(MTOBJODIR)$(DIRSEP)js_system$(OFILE)\
+ 			$(MTOBJODIR)$(DIRSEP)js_user$(OFILE)\
++			$(MTOBJODIR)$(DIRSEP)js_sqlite$(OFILE)\
+ 			$(MTOBJODIR)$(DIRSEP)js_xtrn_area$(OFILE)\
+ 			$(MTOBJODIR)$(DIRSEP)listfile$(OFILE)\
+ 			$(MTOBJODIR)$(DIRSEP)load_cfg$(OFILE)\
+Index: sbbs.h
+===================================================================
+RCS file: /cvsroot/sbbs/src/sbbs3/sbbs.h,v
+retrieving revision 1.391
+diff -u -r1.391 sbbs.h
+--- sbbs.h	11 Jul 2012 22:25:46 -0000	1.391
++++ sbbs.h	27 Jul 2012 18:35:40 -0000
+@@ -1129,6 +1129,9 @@
+ 	/* js_file.c */
+ 	DLLEXPORT JSObject* DLLCALL js_CreateFileClass(JSContext* cx, JSObject* parent);
+ 
++    /* js_sqlite.c */
++    DLLEXPORT JSObject* DLLCALL js_CreateSqliteClass(JSContext* cx, JSObject* parent);
++
+ 	/* js_sprintf.c */
+ 	DLLEXPORT char*		DLLCALL js_sprintf(JSContext* cx, uint argn, uintN argc, jsval *argv);
+ 	DLLEXPORT void		DLLCALL js_sprintf_free(char *);
+Index: sbbsdefs.h
+===================================================================
+RCS file: /cvsroot/sbbs/src/sbbs3/sbbsdefs.h,v
+retrieving revision 1.180
+diff -u -r1.180 sbbsdefs.h
+--- sbbsdefs.h	15 Jun 2012 21:34:54 -0000	1.180
++++ sbbsdefs.h	27 Jul 2012 18:35:41 -0000
+@@ -51,7 +51,7 @@
+ /*************/
+ 
+ #define VERSION 	"3.16"  /* Version: Major.minor  */
+-#define REVISION	'a'     /* Revision: lowercase letter */
++#define REVISION	'a/sqlite'     /* Revision: lowercase letter */
+ #define VERSION_NUM	(31600	 + (tolower(REVISION)-'a'))
+ #define VERSION_HEX	(0x31600 + (tolower(REVISION)-'a'))
+ 
+--- js_sqlite.c	2012-07-22 14:09:49.227529096 +1000
++++ js_sqlite.c	2012-07-25 12:02:18.724048026 +1000
+@@ -0,0 +1,494 @@
++/* jsp_sqlite.c */
++
++/* Synchronet JavaScript "Sqlite" Object */
++
++/* $Id: js_sqlite.c,v 1.99 2006/07/21 04:26:17 deuce Exp $ */
++
++/****************************************************************************
++ * @format.tab-size 4		(Plain Text/Source Code File Header)			*
++ * @format.use-tabs true	(see http://www.synchro.net/ptsc_hdr.html)		*
++ *																			*
++ * Copyright 2006 Rob Swindell - http://www.synchro.net/copyright.html		*
++ *																			*
++ * This program is free software; you can redistribute it and/or			*
++ * modify it under the terms of the GNU General Public License				*
++ * as published by the Free Software Foundation; either version 2			*
++ * of the License, or (at your option) any later version.					*
++ * See the GNU General Public License for more details: gpl.txt or			*
++ * http://www.fsf.org/copyleft/gpl.html										*
++ *																			*
++ * Anonymous FTP access to the most recent released source is available at	*
++ * ftp://vert.synchro.net, ftp://cvs.synchro.net and ftp://ftp.synchro.net	*
++ *																			*
++ * Anonymous CVS access to the development source and modification history	*
++ * is available at cvs.synchro.net:/cvsroot/sbbs, example:					*
++ * cvs -d :pserver:anonymous@cvs.synchro.net:/cvsroot/sbbs login			*
++ *     (just hit return, no password is necessary)							*
++ * cvs -d :pserver:anonymous@cvs.synchro.net:/cvsroot/sbbs checkout src		*
++ *																			*
++ * For Synchronet coding style and modification guidelines, see				*
++ * http://www.synchro.net/source.html										*
++ *																			*
++ * You are encouraged to submit any modifications (preferably in Unix diff	*
++ * format) via e-mail to mods@synchro.net									*
++ *																			*
++ * Note: If this box doesn't appear square, then you need to fix your tabs.	*
++ ****************************************************************************/
++
++#include "sbbs.h"
++#include "sqlite3.h"
++#ifdef JAVASCRIPT
++
++// #include "jsdate.h"	/* Yes, I know this is a private header file */
++
++typedef struct
++{
++	sqlite3*	db; /* pointer to sqlite db */
++	char	name[MAX_PATH+1]; /* db filename */
++	char*	stmt; /* sql query */
++	BOOL	external;	/* externally created, don't close */
++	BOOL	debug; 
++    char*   errormsg; /* last error message */
++
++} private_t;
++
++static const char* getprivate_failure = "line %d %s JS_GetPrivate failed";
++
++static void dbprintf(BOOL error, private_t* p, char* fmt, ...)
++{
++	va_list argptr;
++	char sbuf[1024];
++
++	if(p==NULL || (!p->debug && !error))
++		return;
++
++    va_start(argptr,fmt);
++    vsnprintf(sbuf,sizeof(sbuf),fmt,argptr);
++	sbuf[sizeof(sbuf)-1]=0;
++    va_end(argptr);
++	lprintf(LOG_DEBUG,"Sqlite: %s" , sbuf);
++	//lprintf(LOG_DEBUG,"%04u File %s%s",p->fp ? fileno(p->fp) : 0,error ? "ERROR: ":"",sbuf);
++}
++
++
++/* Sqlite Object Methods */
++
++static JSBool
++js_open(JSContext *cx, uintN argc, jsval *arglist)
++{
++	JSObject   *obj=JS_THIS_OBJECT(cx, arglist);
++	jsval 	   *argv=JS_ARGV(cx, arglist);
++	int         rc;
++	jsint		bufsize=2*1024;
++	JSString*	str;
++	private_t*	p;
++
++	JS_SET_RVAL(cx, arglist, JSVAL_FALSE);
++
++	if((p=(private_t*)JS_GetPrivate(cx,obj))==NULL) {
++		JS_ReportError(cx,getprivate_failure,WHERE);
++		return(JS_FALSE);
++	}
++
++	if(p->db!=NULL)  {
++        dbprintf(FALSE,p, "db already open");
++		JS_SET_RVAL(cx, arglist, JSVAL_TRUE);
++		return(JS_TRUE);
++    }
++    else {
++        dbprintf(FALSE, p , "triying open");
++        rc = sqlite3_open(p->name,&p->db);
++    
++        if( rc ) {
++            sqlite3_close(p->db);
++			JS_SET_RVAL(cx, arglist, JSVAL_FALSE);
++            p->errormsg = "can't open the database (path/permissions incorrect?)";
++            dbprintf(FALSE, p, "can't open: %s",p->name);
++            return (JS_TRUE);
++        }
++    }
++    dbprintf(FALSE,p , "opened!");
++	JS_SET_RVAL(cx, arglist, JSVAL_TRUE);
++	return(JS_TRUE);
++}
++
++
++static JSBool
++js_close(JSContext *cx, uintN argc, jsval *arglist)
++{
++	JSObject *obj=JS_THIS_OBJECT(cx, arglist);
++	jsval *argv=JS_ARGV(cx, arglist);
++	private_t*	p;
++
++	if((p=(private_t*)JS_GetPrivate(cx,obj))==NULL) {
++		JS_ReportError(cx,getprivate_failure,WHERE);
++		return(JS_FALSE);
++	}
++
++	if(p->db==NULL) {
++		JS_SET_RVAL(cx, arglist, JSVAL_FALSE);
++		return(JS_TRUE);
++    }
++    sqlite3_close(p->db);
++    
++	dbprintf(FALSE, p, "closed: %s" , p->name);
++    
++	p->db=NULL; 
++	JS_SET_RVAL(cx, arglist, JSVAL_TRUE);
++	return(JS_TRUE);
++}
++static JSBool
++js_exec(JSContext *cx, uintN argc, jsval *arglist)
++{ 
++	JSObject 		*parent=JS_THIS_OBJECT(cx, arglist);
++	jsval			*argv=JS_ARGV(cx, arglist);
++
++	private_t*	    p;
++	char*			str=NULL;
++
++	int32	count=0;
++    int rc,i;
++
++    JSObject*       Record; // record object
++    JSObject*       Result; // array of records
++    sqlite3_stmt    *ppStmt;
++	jsval           val;
++    jsuint          idx;
++
++    char*           column_name; // column name of Record
++	
++
++	if((p=(private_t*)JS_GetPrivate(cx,parent))==NULL) {
++		JS_ReportError(cx,getprivate_failure,WHERE);
++		return(JS_FALSE);
++	}
++
++	if(argc > 0) {
++		JSVALUE_TO_STRING(cx, argv[0], str, NULL);
++		p->stmt = str;
++	}
++
++	if(p->db==NULL) {
++        dbprintf(TRUE, p, "database is not opened");
++		JS_SET_RVAL(cx, arglist, JSVAL_FALSE);
++		return(JS_TRUE);
++    }
++
++    dbprintf(FALSE, p, "create Result object");
++   	if((Result=JS_NewArrayObject(cx, 0, NULL))==NULL) 
++		return(JS_FALSE);
++
++    if (p->stmt == NULL) {
++        dbprintf(FALSE, p, "empy statement");
++        p->errormsg = "empty statement";
++		JS_SET_RVAL(cx, arglist, JSVAL_FALSE);
++        return(JS_TRUE);
++    }
++        
++    dbprintf (FALSE,p, "prepare: %s",p->stmt);
++    rc = sqlite3_prepare(p->db, p->stmt, -1, &ppStmt, NULL);
++
++    if (rc == SQLITE_OK) {
++        while (sqlite3_step(ppStmt) == SQLITE_ROW) {
++            dbprintf(FALSE, p, "create record object");
++            if((Record=JS_NewObject(cx, NULL, NULL, NULL))==NULL) 
++                return(JS_FALSE);
++            
++            for (i=0; i<sqlite3_column_count(ppStmt); i++) {
++                
++                switch (sqlite3_column_type(ppStmt,i)) {
++					case SQLITE_FLOAT:
++						val = STRING_TO_JSVAL(JS_NewStringCopyZ(cx, sqlite3_column_text(ppStmt, i))); 
++						break;
++                    case SQLITE_INTEGER:
++                        val = INT_TO_JSVAL(sqlite3_column_int(ppStmt,i)); 
++                        break;
++                    case SQLITE_TEXT:
++                        val = STRING_TO_JSVAL(JS_NewStringCopyZ(cx, sqlite3_column_text(ppStmt,i)));
++                        break;
++                    case SQLITE_BLOB:
++                        break;
++                    }
++                
++                if(!JS_SetProperty(cx, Record, sqlite3_column_name(ppStmt,i), &val))
++                    return(JS_FALSE);
++            }
++            dbprintf (FALSE, p , "adding element to the Result");
++            val = OBJECT_TO_JSVAL(Record);
++            idx = -1 ;
++            
++   			if(!JS_GetArrayLength(cx, Result, &idx))
++				return(JS_FALSE);
++
++            if (!JS_SetElement(cx, Result, idx, &val))
++                return(JS_FALSE);
++        }
++        dbprintf(FALSE, p , "end prepare");
++		JS_SET_RVAL(cx, arglist, OBJECT_TO_JSVAL(Result));
++        //*rval = OBJECT_TO_JSVAL(Result);
++        return(JS_TRUE);
++    }
++    else {
++        p->errormsg = (char* ) sqlite3_errmsg(p->db);
++        //*rval = JSVAL_FALSE;
++		JS_SET_RVAL(cx, arglist, JSVAL_FALSE);
++        dbprintf(FALSE, p , "prepare error: %s", sqlite3_errmsg(p->db));
++        return(JS_TRUE);
++    }
++}
++
++/* Sqlite Object Properites */
++enum {
++	 SQLITE_PROP_NAME		
++	,SQLITE_PROP_STMT
++    ,SQLITE_PROP_DEBUG
++    ,SQLITE_PROP_ERRORMSG
++};
++
++
++static JSBool js_sqlite_set(JSContext *cx, JSObject *obj, jsid id, JSBool strict, jsval *vp)
++{
++	jsval		idval;
++    jsint       tiny;
++	private_t*	p;
++	jsrefcount	rc;
++
++	char*		str;
++
++	if((p=(private_t*)JS_GetPrivate(cx,obj))==NULL)
++		return(JS_TRUE);
++
++	JS_IdToValue(cx, id, &idval);
++	tiny = JSVAL_TO_INT(idval);
++
++	JSVALUE_TO_STRING(cx, *vp, str, NULL);
++
++	dbprintf(FALSE, p, "setting property %d to %s",tiny, str);
++	if(str==NULL)
++		return(JS_FALSE);
++
++	switch(tiny) {
++
++        case SQLITE_PROP_NAME:
++			SAFECOPY(p->name, str);
++            break;
++
++		case SQLITE_PROP_DEBUG:
++			JS_ValueToBoolean(cx, *vp, &(p->debug));
++			break;
++
++		case SQLITE_PROP_STMT:
++			JSVALUE_TO_STRING(cx, *vp, str, NULL);
++			p->stmt = str;
++			break;
++
++		default:
++			return(JS_TRUE);
++	}
++
++	dbprintf(FALSE, p, "return");
++	return(JS_TRUE);
++}
++
++static JSBool js_sqlite_get(JSContext *cx, JSObject *obj, jsid id, jsval *vp)
++{
++	jsval 		idval;
++	private_t*	p;
++    jsint       tiny;
++	JSString*	js_str=NULL;
++
++	if((p=(private_t*)JS_GetPrivate(cx,obj))==NULL) {
++		JS_ReportError(cx,getprivate_failure,WHERE);
++		return(JS_FALSE);
++	}
++
++    tiny = JSVAL_TO_INT(id);
++
++	switch(tiny) {
++		case SQLITE_PROP_NAME:
++			if((js_str=JS_NewStringCopyZ(cx, p->name))==NULL)
++				return(JS_FALSE);
++			*vp = STRING_TO_JSVAL(js_str);
++			break;
++		case SQLITE_PROP_STMT:
++			if((js_str=JS_NewStringCopyZ(cx, p->stmt))==NULL)
++				return(JS_FALSE);
++			*vp = STRING_TO_JSVAL(js_str);
++			break;
++		case SQLITE_PROP_DEBUG:
++			*vp = BOOLEAN_TO_JSVAL(p->debug);
++			break;
++		case SQLITE_PROP_ERRORMSG:
++			if((js_str=JS_NewStringCopyZ(cx, p->errormsg))==NULL)
++				return(JS_FALSE); 
++			*vp = STRING_TO_JSVAL(js_str);
++			break;
++	}
++
++	return(JS_TRUE);
++}
++
++#define SQLITE_PROP_FLAGS JSPROP_ENUMERATE|JSPROP_READONLY
++
++static jsSyncPropertySpec js_sqlite_properties[] = {
++/*		 name				,tinyid					,flags,				ver	*/
++	{	"name"				,SQLITE_PROP_NAME			,JSPROP_ENUMERATE|JSPROP_READONLY,	310},
++    {	"stmt"				,SQLITE_PROP_STMT			,JSPROP_ENUMERATE,	310},
++	{	"debug"				,SQLITE_PROP_DEBUG	    	,JSPROP_ENUMERATE,	310},
++	{	"errormsg"			,SQLITE_PROP_ERRORMSG		,JSPROP_ENUMERATE|JSPROP_READONLY,	310},
++	{0}
++};
++
++#ifdef BUILD_JSDOCS
++static char* sqlite_prop_desc[] = {
++	 "filename specified in constructor - <small>READ ONLY</small>"
++    ,"string sql statement"
++	,"set to <i>true</i> to enable debug log output"
++	,"get the last error message - <small>READ ONLY</small>"
++	,NULL
++};
++#endif
++
++
++static jsSyncMethodSpec js_sqlite_functions[] = {
++	{"open",			js_open,			1,	JSTYPE_BOOLEAN,	JSDOCSTR("Open the database") ,JSDOCSTR("open the sqlite3 database") ,310 },		
++	{"close",			js_close,			0,	JSTYPE_VOID,	JSDOCSTR("") ,JSDOCSTR("close database") ,310 },		
++	{"exec",			js_exec,			0,	JSTYPE_BOOLEAN, JSDOCSTR("") ,JSDOCSTR("exec the sql query on database") ,310 },
++	{0}
++};
++
++/* File Destructor */
++
++static void js_finalize_sqlite(JSContext *cx, JSObject *obj)
++{
++	private_t* p;
++	
++	if((p=(private_t*)JS_GetPrivate(cx,obj))==NULL)
++		return;
++
++	if(p->external==JS_FALSE && p->db!=NULL)
++		sqlite3_close(p->db);
++    //sqlite3_free(p->errormsg);
++    
++	dbprintf(FALSE, p, "finalize Sqlite object");
++
++	free(p);
++
++	JS_SetPrivate(cx, obj, NULL);
++}
++
++static JSClass js_sqlite_class = {
++     "Sqlite"				/* name			*/
++    ,JSCLASS_HAS_PRIVATE	/* flags		*/
++	,JS_PropertyStub		/* addProperty	*/
++	,JS_PropertyStub		/* delProperty	*/
++	,js_sqlite_get			/* getProperty	*/
++	,js_sqlite_set			/* setProperty	*/
++	,JS_EnumerateStub		/* enumerate	*/
++	,JS_ResolveStub			/* resolve		*/
++	,JS_ConvertStub			/* convert		*/
++	,js_finalize_sqlite		/* finalize		*/
++};
++
++/* Sqlite Constructor (creates database object) */
++
++static JSBool
++js_sqlite_constructor(JSContext *cx, uintN argc, jsval *arglist)
++{
++	JSObject*	obj;
++	jsval		*argv=JS_ARGV(cx, arglist);
++
++	private_t*	p;
++	char*		str=NULL;
++
++	obj=JS_NewObject(cx, &js_sqlite_class, NULL, NULL);
++	JS_SET_RVAL(cx, arglist, OBJECT_TO_JSVAL(obj));
++
++	if((p=(private_t*)calloc(1,sizeof(private_t)))==NULL) {
++		JS_ReportError(cx,"calloc failed");
++		return(JS_FALSE);
++	}
++	memset(p,0,sizeof(private_t));
++
++
++	JSVALUE_TO_STRING(cx, argv[0], str, NULL);
++	SAFECOPY(p->name,str);
++
++	if(!JS_SetPrivate(cx, obj, p)) {
++		dbprintf(TRUE, p, "JS_SetPrivate failed\n");
++		return(JS_FALSE);
++	}
++
++	if(!js_DefineSyncProperties(cx, obj, js_sqlite_properties)) {
++		dbprintf(TRUE, p, "js_DefineSyncProperties failed\n");
++		return(JS_FALSE);
++	}
++
++	if(!js_DefineSyncMethods(cx, obj, js_sqlite_functions, FALSE)) {
++		dbprintf(TRUE, p, "js_DefineSyncMethods failed\n");
++		return(JS_FALSE);
++	}
++
++#ifdef BUILD_JSDOCS
++	js_DescribeSyncObject(cx,obj,"Can used to manipulate sqlite database" ,310);
++	js_DescribeSyncConstructor(cx,obj,"To create a new Sqlite object: <tt>var f = new Sqlite(<i>filename</i>)</tt>");
++	js_CreateArrayOfStrings(cx, obj, "_property_desc_list", sqlite_prop_desc, JSPROP_READONLY);
++#endif
++
++	dbprintf(FALSE, p, "object constructed");
++	return(JS_TRUE);
++}
++
++JSObject* DLLCALL js_CreateSqliteClass(JSContext* cx, JSObject* parent)
++{
++	JSObject*	obj;
++
++	obj = JS_InitClass(cx, parent, NULL
++		,&js_sqlite_class
++		,js_sqlite_constructor
++		,1		/* number of constructor args */
++		,NULL	/* props, set in constructor */
++		,NULL	/* funcs, set in constructor */
++		,NULL,NULL);
++
++	return(obj);
++}
++
++JSObject* DLLCALL js_CreateSqliteObject(JSContext* cx, JSObject* parent, char *name, sqlite3* db)
++{
++	JSObject* obj;
++	private_t*	p;
++
++	lprintf(LOG_DEBUG,"go go go");
++
++
++	obj = JS_DefineObject(cx, parent, name, &js_sqlite_class, NULL
++		,JSPROP_ENUMERATE|JSPROP_READONLY);
++
++	if(obj==NULL)
++		return(NULL);
++
++	if(!js_DefineSyncProperties(cx, obj, js_sqlite_properties))
++		return(NULL);
++
++	if (!js_DefineSyncMethods(cx, obj, js_sqlite_functions, FALSE)) 
++		return(NULL);
++
++	if((p=(private_t*)calloc(1,sizeof(private_t)))==NULL)
++		return(NULL);
++
++	p->db=db;
++	p->debug=JS_FALSE;
++	p->external=JS_TRUE;
++    p->errormsg = JS_FALSE;
++	if(!JS_SetPrivate(cx, obj, p)) {
++		dbprintf(TRUE, p, "JS_SetPrivate failed\n");
++		return(NULL);
++	}
++
++	dbprintf(FALSE, p, "object created\n");
++
++	return(obj);
++}
++
++#endif	/* JAVASCRIPT */
